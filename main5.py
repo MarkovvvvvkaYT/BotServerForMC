@@ -93,12 +93,16 @@ def bot_start(message):
     bot.send_message(message.chat.id, '🚀 Бот запускается...')
 
     # Создаем бота Minecraft
-    mineBot = mineflayer.createBot({
+    try:
+        mineBot = mineflayer.createBot({
         'host': server["host"],
         'port': server["port"],
         'username': server.get("username", "BotServer"),
         'version': False
-    })
+        })
+    except ValueError as e:
+        print(e)
+    
 
     # Обработчик успешного подключения
     @On(mineBot, 'login')
@@ -109,8 +113,8 @@ def bot_start(message):
     # Обработчик ошибок подключения
     @On(mineBot, 'error')
     def handle_error(err, *args):
-        bot.send_message(message.chat.id, f'❌ Ошибка подключения: {err}')
-
+        #bot.send_message(message.chat.id, f'❌ Ошибка подключения: {err}')
+        print(err)
     # Обработчик сообщений в чате Minecraft
     @On(mineBot, 'chat')
     def handle_chat(username, message, *args):
