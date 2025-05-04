@@ -1,12 +1,13 @@
 import telebot
 from telebot import types
-from javascript import require, On
+from javascript import require, On, JSObject
 import time
 import sqlite3
 import json
 
+
 # Замените на ваш токен Telegram-бота
-TELEGRAM_BOT_TOKEN = '7610642746:AAH6a96m_EpRpwB5GSB9gxrJZCQjMebe_7U'
+TELEGRAM_BOT_TOKEN = '7610642746:AAGZxGWpLzFr_nPfMyEocMMMAL-pFKprQIE'
 
 # Инициализация бота
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -82,26 +83,39 @@ def start(message):
 # Обработчик команды /BotStart
 @bot.message_handler(commands=['BotStart'])
 def bot_start(message):
-    global mineBot
+    global mineBot, Nick
     user_id = message.from_user.id
 
     if user_id not in server_list or not server_list[user_id]:
         bot.send_message(message.chat.id, "❌ Сначала добавьте сервер с помощью команды /Servers.")
         return
 
-    server = server_list[user_id][0]  # Используем первый сервер из списка
+    server = server_list[user_id][0]
     bot.send_message(message.chat.id, '🚀 Бот запускается...')
 
-    # Создаем бота Minecraft
     try:
         mineBot = mineflayer.createBot({
-        'host': server["host"],
-        'port': server["port"],
-        'username': server.get("username", "BotServer"),
-        'version': False
+            'host': server["host"],
+            'port': server["port"],
+            'username': server.get("username", "BotServer"),
+            'version': False
         })
-    except ValueError as e:
+        
+        @On(mineBot, 'login')
+        def handle_login(*args):
+            bot.send_message(message.chat.id, '✅ Бот успешно подключился к серверу Minecraft!')
+            last_message_time[user_id] = time.time()
+
+        @On(mineBot, 'error')
+        def handle_error(err, *args):
+            bot.send_message(message.chat.id, f'❌ Ошибка подключения')
+            print(str(err)[:200])
+            mineBot = None
+
+    except Exception as e:
+        bot.send_message(message.chat.id, f'❌ Не удалось создать бота')
         print(e)
+        mineBot = None
     
 
     # Обработчик успешного подключения
@@ -145,8 +159,10 @@ def servers_menu(message):
 
 # Обработчик инлайн кнопок для /Servers
 @bot.callback_query_handler(func=lambda call: call.data in ["select_server", "add_server", "delete_server"])
+
 def servers_callback(call):
     user_id = call.from_user.id
+    load_servers(user_id)
     if call.data == "select_server":
         if user_id in server_list and server_list[user_id]:
             markup = types.InlineKeyboardMarkup()
@@ -248,18 +264,134 @@ def get_coordinates(message):
         bot.send_message(message.chat.id, "❌ Бот Minecraft не запущен. Используйте /BotStart.")
 
 # Обработчик команды /GetPlayers
+# @bot.message_handler(commands=['GetPlayers'])
+# def get_players(message):
+#     global mineBot
+
+#     if not mineBot:
+#         bot.send_message(message.chat.id, "❌ Бот не подключен. Используйте /BotStart.")
+#         return
+
+#     try:
+#         players = mineBot.players
+#         print(players)
+        
+#         # Способ 1: Используем ключи словаря (никнеймы)
+#         player_names = list(players.keys())
+        
+#         # # ИЛИ Способ 2: Извлекаем username из объектов (более надежно)
+#         # player_names = []
+#         # for player_key, player_data in players.items():
+#         #     # Проверяем разные варианты хранения username
+#         #     username = getattr(player_data, 'username', None) or player_key
+#         #     player_names.append(username)
+        
+#         print("Список игроков:", player_names)  # Для отладки
+
+#         if not player_names:
+#             bot.send_message(message.chat.id, "👥 На сервере нет игроков.")
+#             return
+
+#         # Создаем инлайн-кнопки
+#         markup = types.InlineKeyboardMarkup()
+#         for name in player_names:
+#             btn = types.InlineKeyboardButton(
+#                 text=name,
+#                 callback_data=f'player_{name}'  # Можно использовать для действий с игроком
+#             )
+#             markup.add(btn)
+
+#         bot.send_message(
+#             message.chat.id,
+#             f"👥 Игроки онлайн ({len(player_names)}):",
+#             reply_markup=markup
+#         )
+
+#     except Exception as e:
+#         print(f"Ошибка в /GetPlayers: {e}")
+#         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
+
+# @bot.message_handler(commands=['GetPlayers'])
+# def get_players(message):
+#     global mineBot
+
+#     if not mineBot:
+#         bot.send_message(message.chat.id, "❌ Бот не подключен. Используйте /BotStart.")
+#         return
+
+    
+#     # Получаем объект players (это словарь вида {uuid: player})
+#     players = json.loads(str(mineBot.players))
+#     print(1)
+#     print(type(players))
+#     print(players)
+#     # print(players['MarkovvvvvkaYT'])
+#     # real_players = [
+#     #     player
+#     #     for player in players.keys()
+#     # ]
+#     print(2)
+#     # print(real_players)
+#     # if not real_players:
+#     #     bot.send_message(message.chat.id, "👥 На сервере нет игроков.")
+#     # else:
+#     print(f"👥 Игроки онлайн: {', '.join(players)}")
+#     bot.send_message(message.chat.id, f"👥 Игроки онлайн: {', '.join(players)}")
+
+def get_player_names(players_proxy):
+    """Извлекает имена игроков из Proxy-объекта"""
+    player_names = []
+    
+    # Получаем список ключей (имен игроков)
+    player_keys = list(players_proxy.keys())
+    
+    for key in player_keys:
+        try:
+            # Получаем объект игрока
+            player = players_proxy[key]
+            
+            # Получаем username через getattr
+            if hasattr(player, 'username'):
+                username = getattr(player, 'username')
+                if isinstance(username, str):
+                    player_names.append(username)
+        except Exception as e:
+            print(f"Ошибка обработки игрока {key}: {e}")
+    
+    return player_names
+
 @bot.message_handler(commands=['GetPlayers'])
 def get_players(message):
     global mineBot
-    if mineBot:
-        try:
-            players = mineBot.players
-            player_list = [player.username for player in players.values()]
-            bot.send_message(message.chat.id, f"👥 Игроки на сервере: {', '.join(player_list)}")
-        except Exception as e:
-            bot.send_message(message.chat.id, f"❌ Ошибка при получении списка игроков: {e}")
-    else:
-        bot.send_message(message.chat.id, "❌ Бот Minecraft не запущен. Используйте /BotStart.")
+
+    if not mineBot:
+        bot.send_message(message.chat.id, "❌ Бот не подключен. Используйте /BotStart.")
+        return
+
+    try:
+        # Получаем Proxy-объект players
+        players_proxy = mineBot.players
+        
+        # Извлекаем имена игроков
+        player_names = get_player_names(players_proxy)
+        
+        # Создаем кнопки
+        markup = types.InlineKeyboardMarkup()
+        for name in player_names:
+            markup.add(types.InlineKeyboardButton(name, callback_data='ignore'))
+
+        if player_names:
+            bot.send_message(message.chat.id, "👥 Игроки онлайн:", reply_markup=markup)
+        else:
+            bot.send_message(message.chat.id, "🔴 На сервере нет игроков")
+
+    except Exception as e:
+        error_msg = str(e)[:300]  # Обрезаем длинные сообщения
+        bot.send_message(message.chat.id, f"❌ Ошибка: {error_msg}")
+        print(f"Полная ошибка: {e}")
+
+
+
 
 # Обработчик команды /GetStatus
 @bot.message_handler(commands=['GetStatus'])
