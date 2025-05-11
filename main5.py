@@ -1,13 +1,13 @@
 import telebot
 from telebot import types
-from javascript import require, On, JSObject
+from javascript import require, On
 import time
 import sqlite3
 import json
-
+import re
 
 # Замените на ваш токен Telegram-бота
-TELEGRAM_BOT_TOKEN = '7610642746:AAGZxGWpLzFr_nPfMyEocMMMAL-pFKprQIE'
+TELEGRAM_BOT_TOKEN = '7610642746:AAGNpOtFUePvIk32j876Y9yi2fzQoa4iv7A'
 
 # Инициализация бота
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -23,27 +23,57 @@ track_chat = False  # Флаг для отслеживания игрового 
 chat_users = {}  # Словарь для хранения пользователей, которые включили отслеживание чата
 
 # Подключение к базе данных
-conn = sqlite3.connect('servers.db', check_same_thread=False)
+conn = sqlite3.connect('configs.db', check_same_thread=False)
 cursor = conn.cursor()
-cursor.execute('''CREATE TABLE IF NOT EXISTS servers
-                  (user_id INTEGER, server_data TEXT)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS configs
+                  (user_id INTEGER, server_data TEXT, bot_username TEXT DEFAULT 'Bot')''')
 conn.commit()
 
 # Загрузка серверов из базы данных
 def load_servers(user_id):
-    cursor.execute("SELECT server_data FROM servers WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT server_data FROM configs WHERE user_id = ?", (user_id,))
     rows = cursor.fetchall()
-    server_list[user_id] = [json.loads(row[0]) for row in rows]
+    
+    if not rows:
+        server_list[user_id] = []
+        return
+    
+    try:
+        # Десериализуем JSON из первой строки
+        servers = json.loads(rows[0][0])
+        
+        # Проверяем, что это список
+        if isinstance(servers, list):
+            server_list[user_id] = servers
+        else:
+            # Если в базе один сервер как словарь, преобразуем в список
+            server_list[user_id] = [servers]
+            
+    except json.JSONDecodeError as e:
+        print(f"Ошибка декодирования JSON: {e}")
+        server_list[user_id] = []
 
 # Сохранение сервера в базу данных
 def save_server(user_id, server_data):
-    cursor.execute("INSERT INTO servers (user_id, server_data) VALUES (?, ?)",
-                   (user_id, json.dumps(server_data)))
+    # Загружаем текущие данные
+    cursor.execute("SELECT server_data FROM configs WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    
+    if row:
+        # Обновляем существующую запись
+        servers = json.loads(row[0])
+        servers.append(server_data)
+        cursor.execute("UPDATE configs SET server_data = ? WHERE user_id = ?",
+                      (json.dumps(servers), user_id))
+    else:
+        # Создаем новую запись
+        cursor.execute("INSERT INTO configs (user_id, server_data) VALUES (?, ?)",
+                      (user_id, json.dumps([server_data])))
     conn.commit()
 
 # Удаление сервера из базы данных
 def delete_server(user_id, server_data):
-    cursor.execute("DELETE FROM servers WHERE user_id = ? AND server_data = ?",
+    cursor.execute("DELETE FROM configs WHERE user_id = ? AND server_data = ?",
                    (user_id, json.dumps(server_data)))
     conn.commit()
 
@@ -85,19 +115,21 @@ def start(message):
 def bot_start(message):
     global mineBot, Nick
     user_id = message.from_user.id
-
+    load_servers(user_id)
     if user_id not in server_list or not server_list[user_id]:
         bot.send_message(message.chat.id, "❌ Сначала добавьте сервер с помощью команды /Servers.")
         return
 
     server = server_list[user_id][0]
     bot.send_message(message.chat.id, '🚀 Бот запускается...')
-
+    cursor.execute("SELECT bot_username FROM configs WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    print(rows)
     try:
         mineBot = mineflayer.createBot({
             'host': server["host"],
             'port': server["port"],
-            'username': server.get("username", "BotServer"),
+            'username': "Bot",
             'version': False
         })
         
@@ -194,10 +226,13 @@ def process_add_server(message):
         host, port = message.text.split(':')
         server_data = {"host": host, "port": int(port)}
         save_server(user_id, server_data)
-        load_servers(user_id)
+        #load_servers(user_id)
         bot.send_message(message.chat.id, f"✅ Сервер добавлен: {host}:{port}")
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {e}. Введите адрес и порт в формате: адрес:порт")
+
+
+    
 
 # Обработчик выбора сервера
 @bot.callback_query_handler(func=lambda call: call.data.startswith("select_"))
@@ -209,15 +244,61 @@ def select_server(call):
     bot.send_message(call.message.chat.id, f"✅ Выбран сервер: {host}:{port}")
 
 # Обработчик удаления сервера
+def delete_server(user_id, server_data):
+    """Удаляет сервер из базы данных"""
+    cursor.execute("SELECT server_data FROM configs WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    
+    if not row or not row[0]:
+        return False
+    
+    try:
+        # Получаем список серверов
+        servers = json.loads(row[0])
+        
+        # Находим индекс сервера для удаления
+        index_to_delete = None
+        for i, server in enumerate(servers):
+            if (str(server['host']) == str(server_data['host']) and 
+                int(server['port']) == int(server_data['port'])):
+                index_to_delete = i
+                break
+        
+        # Если сервер найден - удаляем
+        if index_to_delete is not None:
+            del servers[index_to_delete]
+            
+            # Обновляем базу данных
+            cursor.execute("UPDATE configs SET server_data = ? WHERE user_id = ?",
+                          (json.dumps(servers), user_id))
+            conn.commit()
+            return True
+            
+    except Exception as e:
+        print(f"Ошибка при удалении сервера: {e}")
+    
+    return False
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delete_"))
 def delete_server_callback(call):
     user_id = call.from_user.id
     server_str = call.data.replace("delete_", "")
-    host, port = server_str.split(':')
-    server_data = {"host": host, "port": int(port)}
-    delete_server(user_id, server_data)
-    load_servers(user_id)
-    bot.send_message(call.message.chat.id, f"✅ Сервер удален: {host}:{port}")
+    
+    try:
+        host, port = server_str.split(':')
+        server_data = {"host": host, "port": int(port)}
+        
+        # Удаляем сервер и проверяем результат
+        if delete_server(user_id, server_data):
+            # Обновляем кеш серверов
+            load_servers(user_id)
+            bot.send_message(call.message.chat.id, f"✅ Сервер удален: {host}:{port}")
+        else:
+            bot.send_message(call.message.chat.id, "❌ Сервер не найден или произошла ошибка")
+            
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Ошибка: {str(e)[:200]}")
+        print(f"Ошибка в delete_server_callback: {e}")
 
 # Обработчик команды /ChangeNick
 @bot.message_handler(commands=['ChangeNick'])
@@ -263,102 +344,12 @@ def get_coordinates(message):
     else:
         bot.send_message(message.chat.id, "❌ Бот Minecraft не запущен. Используйте /BotStart.")
 
-# Обработчик команды /GetPlayers
-# @bot.message_handler(commands=['GetPlayers'])
-# def get_players(message):
-#     global mineBot
 
-#     if not mineBot:
-#         bot.send_message(message.chat.id, "❌ Бот не подключен. Используйте /BotStart.")
-#         return
 
-#     try:
-#         players = mineBot.players
-#         print(players)
-        
-#         # Способ 1: Используем ключи словаря (никнеймы)
-#         player_names = list(players.keys())
-        
-#         # # ИЛИ Способ 2: Извлекаем username из объектов (более надежно)
-#         # player_names = []
-#         # for player_key, player_data in players.items():
-#         #     # Проверяем разные варианты хранения username
-#         #     username = getattr(player_data, 'username', None) or player_key
-#         #     player_names.append(username)
-        
-#         print("Список игроков:", player_names)  # Для отладки
-
-#         if not player_names:
-#             bot.send_message(message.chat.id, "👥 На сервере нет игроков.")
-#             return
-
-#         # Создаем инлайн-кнопки
-#         markup = types.InlineKeyboardMarkup()
-#         for name in player_names:
-#             btn = types.InlineKeyboardButton(
-#                 text=name,
-#                 callback_data=f'player_{name}'  # Можно использовать для действий с игроком
-#             )
-#             markup.add(btn)
-
-#         bot.send_message(
-#             message.chat.id,
-#             f"👥 Игроки онлайн ({len(player_names)}):",
-#             reply_markup=markup
-#         )
-
-#     except Exception as e:
-#         print(f"Ошибка в /GetPlayers: {e}")
-#         bot.send_message(message.chat.id, f"❌ Ошибка: {str(e)}")
-
-# @bot.message_handler(commands=['GetPlayers'])
-# def get_players(message):
-#     global mineBot
-
-#     if not mineBot:
-#         bot.send_message(message.chat.id, "❌ Бот не подключен. Используйте /BotStart.")
-#         return
-
-    
-#     # Получаем объект players (это словарь вида {uuid: player})
-#     players = json.loads(str(mineBot.players))
-#     print(1)
-#     print(type(players))
-#     print(players)
-#     # print(players['MarkovvvvvkaYT'])
-#     # real_players = [
-#     #     player
-#     #     for player in players.keys()
-#     # ]
-#     print(2)
-#     # print(real_players)
-#     # if not real_players:
-#     #     bot.send_message(message.chat.id, "👥 На сервере нет игроков.")
-#     # else:
-#     print(f"👥 Игроки онлайн: {', '.join(players)}")
-#     bot.send_message(message.chat.id, f"👥 Игроки онлайн: {', '.join(players)}")
-
-def get_player_names(players_proxy):
-    """Извлекает имена игроков из Proxy-объекта"""
-    player_names = []
-    
-    # Получаем список ключей (имен игроков)
-    player_keys = list(players_proxy.keys())
-    
-    for key in player_keys:
-        try:
-            # Получаем объект игрока
-            player = players_proxy[key]
-            
-            # Получаем username через getattr
-            if hasattr(player, 'username'):
-                username = getattr(player, 'username')
-                if isinstance(username, str):
-                    player_names.append(username)
-        except Exception as e:
-            print(f"Ошибка обработки игрока {key}: {e}")
-    
-    return player_names
+def extract_usernames_from_text(data_text):
+    """Извлекает все имена игроков из текстового представления объекта"""
+    pattern = r"username: '([^']+)'"
+    return re.findall(pattern, data_text)
 
 @bot.message_handler(commands=['GetPlayers'])
 def get_players(message):
@@ -369,26 +360,28 @@ def get_players(message):
         return
 
     try:
-        # Получаем Proxy-объект players
-        players_proxy = mineBot.players
+        # Получаем текстовое представление объекта players
+        players_text = str(mineBot.players)
         
         # Извлекаем имена игроков
-        player_names = get_player_names(players_proxy)
+        player_names = extract_usernames_from_text(players_text)
+        
+        # Удаляем дубликаты (если есть)
+        unique_names = list(set(player_names))
         
         # Создаем кнопки
         markup = types.InlineKeyboardMarkup()
-        for name in player_names:
+        for name in unique_names:
             markup.add(types.InlineKeyboardButton(name, callback_data='ignore'))
 
-        if player_names:
+        if unique_names:
             bot.send_message(message.chat.id, "👥 Игроки онлайн:", reply_markup=markup)
         else:
             bot.send_message(message.chat.id, "🔴 На сервере нет игроков")
 
     except Exception as e:
-        error_msg = str(e)[:300]  # Обрезаем длинные сообщения
+        error_msg = str(e)[:300]
         bot.send_message(message.chat.id, f"❌ Ошибка: {error_msg}")
-        print(f"Полная ошибка: {e}")
 
 
 
